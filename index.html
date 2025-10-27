@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neuro Research Finder (AJAX + Sanity Check)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .loading::after {
+      content: " ⟳";
+      animation: spin 1s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { 0%{transform:rotate(0)}100%{transform:rotate(360deg)} }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <header class="border-b bg-white/70 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+      <h1 class="text-xl md:text-2xl font-bold">🧠 Neuro Research Finder</h1>
+      <a class="text-sm text-blue-600 hover:underline" target="_blank" href="https://mil.psy.ntu.edu.tw:5000">Backend API</a>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-4">
+    <section class="bg-white rounded-2xl shadow p-5 space-y-4">
+      <h2 class="font-semibold text-lg">搜尋設定</h2>
+
+      <div class="grid gap-3 md:grid-cols-3">
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="mode" value="terms" class="mt-1 h-4 w-4" checked>
+          <div>
+            <p class="font-medium">顯示所有可搜尋的關鍵字</p>
+            <p class="text-sm text-slate-500">列出所有可用的 brain terms（例如 amygdala、insula…）。</p>
+          </div>
+        </label>
+
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="mode" value="term-related" class="mt-1 h-4 w-4">
+          <div>
+            <p class="font-medium">查找與某關鍵字相關的詞</p>
+            <p class="text-sm text-slate-500">例如輸入「amygdala」，找出最常一起出現的關鍵詞。</p>
+          </div>
+        </label>
+
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="mode" value="query-studies" class="mt-1 h-4 w-4">
+          <div>
+            <p class="font-medium">搜尋相關研究文章</p>
+            <p class="text-sm text-slate-500">可使用邏輯字串（例：amygdala not emotion）。</p>
+          </div>
+        </label>
+      </div>
+
+      <div class="flex flex-col gap-2 md:flex-row">
+        <input id="input" class="flex-1 px-3 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500"
+               placeholder="輸入關鍵字（例如：amygdala）">
+        <button id="go" class="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700">搜尋</button>
+      </div>
+
+      <!-- 建議搜尋 -->
+      <div class="flex flex-wrap gap-2 text-xs">
+        <button class="ex px-3 py-1 rounded-lg bg-slate-200 hover:bg-slate-300" data-mode="terms" data-value="">🔍 顯示所有關鍵字</button>
+        <button class="ex px-3 py-1 rounded-lg bg-slate-200 hover:bg-slate-300" data-mode="term-related" data-value="amygdala">🔗 查找 amygdala 的相關詞</button>
+        <button class="ex px-3 py-1 rounded-lg bg-slate-200 hover:bg-slate-300" data-mode="query-studies" data-value="amygdala not emotion">📄 搜尋 amygdala not emotion 的研究</button>
+      </div>
+
+      <p id="status" class="text-sm text-slate-500"></p>
+    </section>
+
+    <!-- 結果 -->
+    <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+      <div class="flex items-center justify-between">
+        <h3 class="font-semibold">查詢結果</h3>
+        <div id="meta" class="text-xs text-slate-500"></div>
+      </div>
+      <div id="out" class="overflow-auto max-h-[70vh]"></div>
+    </section>
+  </main>
+
+  <script>
+    const BASE = "https://mil.psy.ntu.edu.tw:5000";
+    const $ = (id)=>document.getElementById(id);
+    const input = $("input"), go = $("go"), out = $("out"), meta = $("meta"), statusEl = $("status");
+    const radios = Array.from(document.querySelectorAll('input[name="mode"]'));
+
+    // -------- Utilities ----------
+    const escapeHTML = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const formatCell = v => v==null?'—':escapeHTML(String(v));
+
+    // -------- Renderers ----------
+    function renderTerms(arr){
+      out.innerHTML = `<div class="grid gap-2 grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
+        ${arr.map(t=>`<div class="px-3 py-2 text-center bg-slate-100 rounded-lg text-sm hover:bg-slate-200">${escapeHTML(t)}</div>`).join("")}
+      </div>`;
+    }
+
+    function renderRelated(arr){
+      const head=`<thead class="bg-slate-100"><tr>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">相關詞</th>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">出現次數</th>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">關聯程度 (Jaccard)</th>
+      </tr></thead>`;
+      const body=arr.map(a=>`<tr class="border-b hover:bg-slate-50">
+        <td class="px-3 py-2">${formatCell(a.term)}</td>
+        <td class="px-3 py-2">${formatCell(a.co_count)}</td>
+        <td class="px-3 py-2">${formatCell(a.jaccard)}</td>
+      </tr>`).join("");
+      out.innerHTML=`<table class="min-w-full text-sm">${head}<tbody>${body}</tbody></table>`;
+    }
+
+    function renderStudies(arr){
+      const head=`<thead class="bg-slate-100"><tr>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">序號</th>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">Study ID</th>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">作者</th>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">標題</th>
+        <th class="px-3 py-2 text-left text-xs font-semibold uppercase">年份</th>
+      </tr></thead>`;
+      const body=arr.map((a,i)=>`<tr class="border-b hover:bg-slate-50">
+        <td class="px-3 py-2 text-slate-500">${i+1}</td>
+        <td class="px-3 py-2">${formatCell(a.study_id)}</td>
+        <td class="px-3 py-2">${formatCell(a.authors)}</td>
+        <td class="px-3 py-2">${formatCell(a.title)}</td>
+        <td class="px-3 py-2">${formatCell(a.year)}</td>
+      </tr>`).join("");
+      out.innerHTML=`<table class="min-w-full text-sm">${head}<tbody>${body}</tbody></table>`;
+    }
+
+    function pickArray(data, mode){
+      if(mode==="terms") return data.terms || data;
+      if(mode==="term-related") return data.related;
+      if(mode==="query-studies") return data.results;
+      return null;
+    }
+
+    // -------- AJAX 核心 + sanity check ----------
+    let timer=null, currentController=null, lastQuery="";
+    async function fetchAndRender(mode, query){
+      // ✅ sanity check 1: 避免空字、重複字、太短字
+      if(mode!=="terms"){
+        const trimmed=query.trim();
+        if(trimmed.length<2) return;
+        if(trimmed===lastQuery) return;
+        lastQuery=trimmed;
+      }
+
+      // ✅ sanity check 2: 避免奇怪符號（term 模式）
+      if(mode==="term-related" && /[^\w\s\-]/.test(query)){
+        statusEl.textContent="⚠️ 關鍵字格式不正確";
+        return;
+      }
+
+      // 若前次請求尚未完成則中斷
+      if(currentController) currentController.abort();
+      currentController = new AbortController();
+      const signal = currentController.signal;
+
+      // 組 URL
+      let url = BASE;
+      if(mode==="terms") url += "/terms";
+      if(mode==="term-related") url += "/terms/"+encodeURIComponent(query);
+      if(mode==="query-studies") url += "/query/"+encodeURIComponent(query)+"/studies";
+
+      statusEl.textContent="Loading...";
+      out.innerHTML='<p class="p-3 text-slate-400">載入中...</p>';
+
+      try{
+        const t0=performance.now();
+        const resp=await fetch(url,{signal});
+        const t1=performance.now();
+        meta.textContent=`URL: ${url} · ${(t1-t0).toFixed(1)} ms`;
+        if(!resp.ok){out.textContent=await resp.text();return;}
+        const data=await resp.json();
+        const arr=pickArray(data,mode);
+        if(!arr||arr.length===0){out.innerHTML='<p class="p-3 text-slate-500">沒有資料。</p>';return;}
+        if(mode==="terms") renderTerms(arr);
+        if(mode==="term-related") renderRelated(arr);
+        if(mode==="query-studies") renderStudies(arr);
+        statusEl.textContent=`HTTP ${resp.status}`;
+      }catch(err){
+        if(err.name!=="AbortError"){
+          out.innerHTML=`<p class="text-red-600 p-3">${err.message}</p>`;
+          statusEl.textContent="Request failed";
+        }
+      }
+    }
+
+    // -------- 即時監聽輸入框 ----------
+    input.addEventListener("input",()=>{
+      const mode=radios.find(r=>r.checked).value;
+      const q=input.value.trim();
+      clearTimeout(timer);
+      if(mode==="term-related" && q.length>=2){
+        timer=setTimeout(()=>fetchAndRender(mode,q),500);
+      }else if(mode==="query-studies" && q.length>=3){
+        timer=setTimeout(()=>fetchAndRender(mode,q),700);
+      }
+    });
+
+    // 按鈕 for /terms
+    go.addEventListener("click",()=>{
+      const mode=radios.find(r=>r.checked).value;
+      if(mode==="terms") fetchAndRender(mode,"");
+    });
+
+    // 建議搜尋按鈕
+    document.querySelectorAll('.ex').forEach(b=>{
+      b.addEventListener('click',()=>{
+        document.querySelector(`input[name="mode"][value="${b.dataset.mode}"]`).checked=true;
+        input.value=b.dataset.value;
+        fetchAndRender(b.dataset.mode,b.dataset.value);
+      });
+    });
+
+    // 預設載入全部 terms
+    fetchAndRender("terms","");
+  </script>
+</body>
+</html>
